@@ -149,6 +149,52 @@ def buscar_cep(cep):
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
+# Nova rota: listar condomínios (proxy para IXC)
+# --------------------------
+@app.route("/api/condominios", methods=["GET"])
+def listar_condominios():
+    """
+    Retorna lista de condominios do IXC (cliente_condominio).
+    Aceita query params opcionais: page, rp, qtype, query
+    """
+    try:
+        page = request.args.get("page", "1")
+        rp = request.args.get("rp", "200")  # buscar até 200 por padrão
+        qtype = request.args.get("qtype", "")
+        query = request.args.get("query", "")
+
+        payload = {
+            "qtype": qtype,
+            "query": query,
+            "oper": "=",
+            "page": str(page),
+            "rp": str(rp)
+        }
+        headers_listar = {**HEADERS, "ixcsoft": "listar"}
+        resp = requests.post(f"{HOST}/cliente_condominio", headers=headers_listar, data=json.dumps(payload), timeout=30)
+        try:
+            data = resp.json()
+        except Exception:
+            return jsonify({"error": "Resposta inválida do IXC", "raw": resp.text}), 500
+
+        # Retornar só registros para o frontend consumir facilmente
+        registros = data.get("registros") or []
+        # Mapeia para id + nome + endereco (opcional) para facilitar o select
+        simplified = []
+        for r in registros:
+            simplified.append({
+                "id": r.get("id"),
+                "condominio": r.get("condominio"),
+                "endereco": r.get("endereco"),
+                "numero": r.get("numero"),
+                "bairro": r.get("bairro")
+            })
+        return jsonify({"total": data.get("total", 0), "registros": simplified}), 200
+    except Exception as e:
+        print("EXCEPTION /api/condominios:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
 # Rotas (omito partes não alteradas para brevidade) - manter o resto igual ao seu app
 # --------------------------
 @app.route("/api/cliente", methods=["POST", "OPTIONS"])
@@ -292,7 +338,7 @@ def get_login_id(contract_id):
         return None, str(e)
 
 # --------------------------
-# Rota principal: transfer (corrigida para lat/lng)
+# Rota principal: transfer (corrigida para lat/lng) - agora com suporte a condominio
 # --------------------------
 @app.route("/api/transfer", methods=["POST", "OPTIONS"])
 def rota_transfer():
@@ -329,6 +375,11 @@ def rota_transfer():
         cidade_antiga = data.get("oldCity") or ""
 
         des_porta = data.get("portaNumber") or data.get("des_porta") or ""
+
+        # Condomínio fields (aceita vários nomes vindos do frontend)
+        condominio_id = data.get("id_condominio") or data.get("condominio") or data.get("condominioId") or data.get("condominio_id")
+        bloco = data.get("bloco") or data.get("block") or data.get("apto_bloco") or ""
+        apartamento = data.get("apartamento") or data.get("apartment") or data.get("apt") or ""
 
         # --- lat/lng/city_ibge: aceita varias chaves vindas do frontend ou do serviço de CEP
         lat = data.get("lat") or data.get("latitude") or None
@@ -402,7 +453,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         id_os = os_data["registros"][0]["id"]
         mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
 
-        # 4) agendar OS de transferência (PUT)
+        # 4) agendar OS de transferência (PUT) - adiciona id_condominio/bloco/apartamento se informado
         payload_agenda = {
             "tipo": "C",
             "id": id_os,
@@ -427,6 +478,15 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
             "data_agenda_final": data_str,
             "mensagem": mensagem_atual
         }
+
+        # injeta campos de condominio na OS se houver
+        if condominio_id:
+            payload_agenda["id_condominio"] = str(condominio_id)
+        if bloco:
+            payload_agenda["bloco"] = str(bloco)
+        if apartamento:
+            payload_agenda["apartamento"] = str(apartamento)
+
         resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
         if resp_put.status_code != 200:
             return jsonify({"error": f"Erro ao agendar OS: {resp_put.status_code} - {resp_put.text}"}), 400
@@ -480,6 +540,14 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         registro["cidade"] = cidade
         registro["complemento"] = complemento
 
+        # injeta campos de condominio no contrato se houver
+        if condominio_id:
+            registro["id_condominio"] = str(condominio_id)
+        if bloco:
+            registro["bloco"] = str(bloco)
+        if apartamento:
+            registro["apartamento"] = str(apartamento)
+
         # ADICIONA latitude/longitude/city_ibge se vieram
         if lat:
             registro["latitude"] = lat
@@ -527,89 +595,8 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
-# Endpoint dedicado para atualizar contrato (separado)
+# Endpoint dedicado para atualizar contrato (separado) - agora aceita condominio/bloco/apartamento
 # --------------------------
-""" @app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
-def rota_update_contrato():
-    try:
-        data = request.get_json() or {}
-        id_contrato = data.get("contractId") or data.get("id_contrato")
-        if not id_contrato:
-            return jsonify({"error": "ID do contrato (contractId) é obrigatório."}), 400
-
-        # Recebe campos do payload
-        endereco = data.get("address") or data.get("endereco") or ""
-        numero = data.get("number") or data.get("numero") or ""
-        bairro = data.get("neighborhood") or data.get("bairro") or ""
-        cep = data.get("cep") or ""
-        cidade = data.get("cidade") or data.get("city") or ""
-        estado = data.get("state") or ""
-        latitude = data.get("lat") or data.get("latitude") or ""
-        longitude = data.get("lng") or data.get("longitude") or ""
-        city_ibge = data.get("city_ibge") or ""
-        motivo_cancelamento = data.get("motivo_cancelamento", " ")
-        complemento = data.get("complement") or data.get("complemento") or "" 
-
-        # Buscar contrato atual
-        payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
-        headers_listar = {**HEADERS, "ixcsoft": "listar"}
-        res = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(payload_get), timeout=30)
-        contrato_data = res.json()
-        if "registros" not in contrato_data or len(contrato_data["registros"]) == 0:
-            return jsonify({"error": "Contrato não encontrado"}), 400
-
-        registro = contrato_data["registros"][0]
-
-        # Atualizar campos do contrato
-        registro["endereco"] = endereco
-        registro["numero"] = numero
-        registro["bairro"] = bairro
-        registro["cep"] = cep
-        registro["cidade"] = cidade
-
-        registro["complemento"] = complemento 
-        registro["estado"] = estado
-        if latitude:
-            registro["latitude"] = latitude
-        if longitude:
-            registro["longitude"] = longitude
-        if city_ibge:
-            registro["city_ibge"] = city_ibge
-
-        # Função para formatar datas
-        def try_format(field, fmt="%d/%m/%Y"):
-            if field in registro and registro[field]:
-                try:
-                    return pd.to_datetime(registro[field]).strftime(fmt)
-                except Exception:
-                    return registro[field]
-            return registro.get(field, "")
-
-        registro["data"] = try_format("data", "%d/%m/%Y")
-        registro["data_expiracao"] = try_format("data_expiracao", "%d/%m/%Y")
-        registro["data_ativacao"] = try_format("data_ativacao", "%d/%m/%Y")
-        registro["data_renovacao"] = try_format("data_renovacao", "%d/%m/%Y")
-        registro["data_cadastro_sistema"] = try_format("data_cadastro_sistema", "%d/%m/%Y %H:%M:%S")
-
-        registro["endereco_padrao_cliente"] = "N"
-        registro["motivo_cancelamento"] = motivo_cancelamento
-        if "ultima_atualizacao" in registro:
-            registro.pop("ultima_atualizacao", None)
-
-        print("ATUALIZANDO CONTRATO:", json.dumps(registro, ensure_ascii=False, indent=2))
-
-        # Enviar PUT para atualizar contrato
-        url_put = f"{HOST}/cliente_contrato/{id_contrato}"
-        headers_put = {"Content-Type": "application/json", "Authorization": TOKEN}
-        res_put = requests.put(url_put, headers=headers_put, data=json.dumps(registro), timeout=30)
-        if res_put.status_code != 200:
-            return jsonify({"error": f"Erro ao atualizar contrato: {res_put.status_code} - {res_put.text}"}), 400
-
-        return jsonify({"message": "Contrato atualizado com sucesso", "put_response": res_put.json()}), 200
-
-    except Exception as e:
-        print("EXCEPTION update_contrato:", str(e))
-        return jsonify({"error": str(e)}), 500 """
 @app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
 def rota_update_contrato():
     try:
@@ -629,6 +616,11 @@ def rota_update_contrato():
         lng = data.get("lng") or data.get("longitude")
         city_ibge = data.get("city_ibge") or data.get("cityIbge")
         complemento = data.get("complement") or data.get("complemento")
+
+        # condominio fields
+        condominio_id = data.get("id_condominio") or data.get("condominio") or data.get("condominioId") or None
+        bloco = data.get("bloco") or data.get("block") or data.get("apartmentBlock") or None
+        apartamento = data.get("apartamento") or data.get("apartment") or data.get("apt") or None
 
         # 1) Buscar contrato atual
         payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
@@ -651,6 +643,14 @@ def rota_update_contrato():
         if lat: registro["latitude"] = lat
         if lng: registro["longitude"] = lng
         if city_ibge: registro["city_ibge"] = city_ibge
+
+        # injeta campos de condominio no registro se vieram
+        if condominio_id:
+            registro["id_condominio"] = str(condominio_id)
+        if bloco is not None:
+            registro["bloco"] = str(bloco)
+        if apartamento is not None:
+            registro["apartamento"] = str(apartamento)
 
         # 3) CEP: enviar apenas se válido (8 dígitos) e formatado com "-"
         def clean_digits(s): return re.sub(r"\D", "", str(s or ""))
