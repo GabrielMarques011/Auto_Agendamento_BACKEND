@@ -120,7 +120,20 @@ def geocode_address(address, city=None, state=None):
     except Exception as e:
         print("Geocode error:", e)
         return None, None
-    
+
+def parse_bool(value):
+    """Normaliza valores booleanos vindos do frontend (True/False, 'true'/'false', 1/0)."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    v = str(value).strip().lower()
+    if v in ("1", "true", "t", "yes", "y"):
+        return True
+    if v in ("0", "false", "f", "no", "n", ""):
+        return False
+    return None
+
 @app.route("/api/cep/<cep>", methods=["GET"])
 def buscar_cep(cep):
     try:
@@ -195,7 +208,6 @@ def listar_condominios():
     except Exception as e:
         print("EXCEPTION /api/condominios:", str(e))
         return jsonify({"error": str(e)}), 500
-
 
 # --------------------------
 # Rotas (omito partes não alteradas para brevidade) - manter o resto igual ao seu app
@@ -278,7 +290,6 @@ def rota_cliente_lookup():
 
 @app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
 def rota_contrato_lookup():
-    # -> mesma implementação do seu app
     try:
         payload = request.get_json() or {}
         qtype = payload.get("qtype")
@@ -308,10 +319,30 @@ def rota_contrato_lookup():
             data = res.json()
         except Exception:
             return jsonify({"error": f"Erro parse response IXC cliente_contrato: {res.status_code} - {res.text}"}), 400
-        total = int(data.get("total") or 0)
-        if total == 0:
-            return jsonify({"error": "Nenhum contrato encontrado para esse cliente.", "data": data}), 400
-        return jsonify(data), 200
+
+        # pega registros originais (se houver)
+        registros_orig = data.get("registros") or []
+
+        # Filtra apenas contratos com status 'A'
+        # Aceita variação de nomes de campo: 'status', 'situacao', 'st'
+        def is_active_contract(r):
+            try:
+                s = (r.get("status") or r.get("situacao") or r.get("st") or "")
+                return str(s).strip().upper() == "A"
+            except Exception:
+                return False
+
+        registros_filtrados = [r for r in registros_orig if is_active_contract(r)]
+
+        # Retorna a lista filtrada e total correspondente
+        response_payload = {
+            "total": len(registros_filtrados),
+            "registros": registros_filtrados
+        }
+
+        # Nota: devolvemos 200 mesmo se não houver contratos ativos (frontend pode lidar com array vazio)
+        return jsonify(response_payload), 200
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -383,6 +414,9 @@ def rota_transfer():
         condominio_id = data.get("id_condominio") or data.get("condominio") or data.get("condominioId") or data.get("condominio_id")
         bloco = data.get("bloco") or data.get("block") or data.get("apto_bloco") or ""
         apartamento = data.get("apartamento") or data.get("apartment") or data.get("apt") or ""
+
+        # lê isCondominio (normaliza)
+        is_condominio = parse_bool(data.get("isCondominio") if "isCondominio" in data else data.get("is_condominio"))
 
         # --- lat/lng/city_ibge: aceita varias chaves vindas do frontend ou do serviço de CEP
         lat = data.get("lat") or data.get("latitude") or None
@@ -517,7 +551,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "mensagem": mensagem_atual
         }
 
-        # injeta campos de condominio na OS se houver
+        # injeta campos de condominio na OS se houver (somente se informado)
         if condominio_id:
             payload_agenda["id_condominio"] = str(condominio_id)
         if bloco:
@@ -571,6 +605,8 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             return jsonify({"error": "Contrato não encontrado"}), 400
 
         registro = contrato_data["registros"][0]
+
+        # ATUALIZA campos básicos
         registro["endereco"] = endereco
         registro["numero"] = numero
         registro["bairro"] = bairro
@@ -578,13 +614,26 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         registro["cidade"] = cidade
         registro["complemento"] = complemento
 
-        # injeta campos de condominio no contrato se houver
-        if condominio_id:
-            registro["id_condominio"] = str(condominio_id)
-        if bloco:
-            registro["bloco"] = str(bloco)
-        if apartamento:
-            registro["apartamento"] = str(apartamento)
+        # Lógica para condominio: se is_condominio for explicitamente False -> limpar campos
+        if is_condominio is False:
+            # envia string vazia para sobrescrever campos no IXC
+            registro["id_condominio"] = ""
+            registro["bloco"] = ""
+            registro["apartamento"] = ""
+        else:
+            # se for True ou None, atualiza apenas se recebido do frontend
+            if condominio_id:
+                registro["id_condominio"] = str(condominio_id)
+            # se bloco/apartamento vierem como string vazia intencionalmente, aceitá-las
+            if bloco is not None and bloco != "":
+                registro["bloco"] = str(bloco)
+            elif bloco == "":
+                # se frontend passou explicitamente "", aplica
+                registro["bloco"] = ""
+            if apartamento is not None and apartamento != "":
+                registro["apartamento"] = str(apartamento)
+            elif apartamento == "":
+                registro["apartamento"] = ""
 
         # ADICIONA latitude/longitude/city_ibge se vieram
         if lat:
@@ -632,7 +681,6 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         print("EXCEPTION:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
 # --------------------------
 # Endpoint dedicado para atualizar contrato (separado) - agora aceita condominio/bloco/apartamento
 # --------------------------
@@ -661,6 +709,9 @@ def rota_update_contrato():
         bloco = data.get("bloco") or data.get("block") or data.get("apartmentBlock") or None
         apartamento = data.get("apartamento") or data.get("apartment") or data.get("apt") or None
 
+        # lê isCondominio (normaliza)
+        is_condominio = parse_bool(data.get("isCondominio") if "isCondominio" in data else data.get("is_condominio"))
+
         # 1) Buscar contrato atual
         payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
         headers_listar = {"Content-Type": "application/json", "Authorization": TOKEN, "ixcsoft": "listar"}
@@ -673,23 +724,29 @@ def rota_update_contrato():
         registro = dados["registros"][0]
 
         # 2) Atualizar apenas campos recebidos
-        if endereco: registro["endereco"] = endereco
-        if numero: registro["numero"] = numero
-        if bairro: registro["bairro"] = bairro
-        if cidade: registro["cidade"] = str(cidade)
-        if estado: registro["estado"] = estado
-        if complemento: registro["complemento"] = complemento
-        if lat: registro["latitude"] = lat
-        if lng: registro["longitude"] = lng
-        if city_ibge: registro["city_ibge"] = city_ibge
+        if endereco is not None: registro["endereco"] = endereco
+        if numero is not None: registro["numero"] = numero
+        if bairro is not None: registro["bairro"] = bairro
+        if cidade is not None: registro["cidade"] = str(cidade)
+        if estado is not None: registro["estado"] = estado
+        if complemento is not None: registro["complemento"] = complemento
+        if lat is not None: registro["latitude"] = lat
+        if lng is not None: registro["longitude"] = lng
+        if city_ibge is not None: registro["city_ibge"] = city_ibge
 
-        # injeta campos de condominio no registro se vieram
-        if condominio_id:
-            registro["id_condominio"] = str(condominio_id)
-        if bloco is not None:
-            registro["bloco"] = str(bloco)
-        if apartamento is not None:
-            registro["apartamento"] = str(apartamento)
+        # limpar campos se não for condomínio (quando explicitamente false)
+        if is_condominio is False:
+            registro["id_condominio"] = "1234"
+            registro["bloco"] = "1234"
+            registro["apartamento"] = "1234"
+        else:
+            # só atualiza se vier algo do frontend
+            if condominio_id is not None:
+                registro["id_condominio"] = str(condominio_id)
+            if bloco is not None:
+                registro["bloco"] = str(bloco)
+            if apartamento is not None:
+                registro["apartamento"] = str(apartamento)
 
         # 3) CEP: enviar apenas se válido (8 dígitos) e formatado com "-"
         def clean_digits(s): return re.sub(r"\D", "", str(s or ""))
