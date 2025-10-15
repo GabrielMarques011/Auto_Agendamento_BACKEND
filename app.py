@@ -96,6 +96,7 @@ def geocode_address(address, city=None, state=None):
     """
     Fallback para obter lat/lng via Nominatim (OpenStreetMap).
     Ativar via .env GEOCODE_ENABLED=true.
+    Atenção: respeitar política de uso do Nominatim (rate limits).
     """
     if not address:
         return None, None
@@ -119,103 +120,40 @@ def geocode_address(address, city=None, state=None):
     except Exception as e:
         print("Geocode error:", e)
         return None, None
-
-# --------------------------
-# Rota CEP: tenta AwesomeAPI -> ViaCEP -> (opcional) Nominatim
-# --------------------------
-@app.route("/api/cep/<cep>", methods=["GET", "OPTIONS"])
+    
+@app.route("/api/cep/<cep>", methods=["GET"])
 def buscar_cep(cep):
     try:
-        cep_digits = re.sub(r"\D", "", cep)
-        if len(cep_digits) != 8:
-            return jsonify({"error": "CEP inválido"}), 400
+        res = requests.get(f"https://cep.awesomeapi.com.br/json/{cep}")
+        if res.status_code != 200:
+            return jsonify({"error": "CEP não encontrado"}), 404
 
-        # 1) Tenta AwesomeAPI (retorna lat/lng quando disponível)
-        awesome_url = f"https://cep.awesomeapi.com.br/json/{cep_digits}"
-        try:
-            r = requests.get(awesome_url, timeout=6)
-            if r.status_code == 200:
-                dados = r.json()
-                # Normaliza campos
-                address = dados.get("address") or (dados.get("address_type", "") + " " + dados.get("address_name", "")) or ""
-                district = dados.get("district") or dados.get("bairro") or ""
-                city = dados.get("city") or ""
-                state = dados.get("state") or ""
-                lat = dados.get("lat") or dados.get("latitude") or ""
-                lng = dados.get("lng") or dados.get("longitude") or ""
-                city_ibge = dados.get("city_ibge") or dados.get("ibge") or ""
-                # tenta obter cityId via IXC
-                city_id = get_city_id_ixc(city)
-                result = {
-                    "cep": dados.get("cep") or cep_digits,
-                    "address": address,
-                    "district": district,
-                    "city": city,
-                    "state": state,
-                    "lat": lat or "",
-                    "lng": lng or "",
-                    "city_ibge": city_ibge,
-                    "cityId": city_id
-                }
-                # se lat/lng vieram já retornamos
-                if result["lat"] and result["lng"]:
-                    return jsonify(result)
-                # caso awesomeapi tenha retornado, mas sem lat/lng, segue para fallback abaixo
-        except Exception as e:
-            print("AwesomeAPI error:", e)
-
-        # 2) ViaCEP (padrão) - não tem lat/lng normalmente
-        try:
-            resp = requests.get(f"https://viacep.com.br/ws/{cep_digits}/json/", timeout=6)
-            dados = resp.json()
-            if dados.get("erro"):
-                raise Exception("CEP não encontrado no ViaCEP")
-            address = dados.get("logradouro") or ""
-            district = dados.get("bairro") or ""
-            city = dados.get("localidade") or ""
-            state = dados.get("uf") or ""
-            city_ibge = dados.get("ibge") or ""
-        except Exception as e:
-            # se falhar both, retorna erro
-            print("ViaCEP error:", e)
-            return jsonify({"error": "CEP não encontrado nos provedores"}), 404
-
-        # tenta mapear cityId via IXC
-        city_id = get_city_id_ixc(city)
-
-        lat = ""
-        lng = ""
-
-        # 3) Se não tem lat/lng e geocode ativado, tenta Nominatim
-        if GEOCODE_ENABLED:
-            lat_g, lng_g = geocode_address(address, city, state)
-            if lat_g and lng_g:
-                lat, lng = lat_g, lng_g
+        data = res.json()
+        city_name = data.get("city")
+        city_id = get_city_id_ixc(city_name)  # pega o ID do IXC
 
         result = {
-            "cep": cep_digits,
-            "address": address,
-            "district": district,
-            "city": city,
-            "state": state,
-            "lat": lat or "",
-            "lng": lng or "",
-            "city_ibge": city_ibge,
-            "cityId": city_id
+            "cep": data.get("cep"),
+            "address": data.get("address"),
+            "district": data.get("district"),
+            "city": city_name,
+            "state": data.get("state"),
+            "cityId": str(city_id) if city_id else None,  # retorna string
+            "city_ibge": data.get("city_ibge"),
+            "lat": data.get("lat"),
+            "lng": data.get("lng")
         }
-        return jsonify(result)
-
+        return jsonify(result), 200
     except Exception as e:
-        print("EXCEPTION buscar_cep:", e)
+        print("Erro ao buscar CEP:", str(e))
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
-# Outros endpoints (cliente, cliente_contrato, get_login_id, transfer, update_contrato)
-# Manter a lógica que você já tinha; abaixo coloquei implementações robustas e compatíveis
+# Rotas (omito partes não alteradas para brevidade) - manter o resto igual ao seu app
 # --------------------------
-
 @app.route("/api/cliente", methods=["POST", "OPTIONS"])
 def rota_cliente_lookup():
+    # -> mesma implementação do seu app (ou a que você já tem)
     try:
         q = request.get_json(force=True) or {}
         query = (q.get("query") or "").strip()
@@ -225,7 +163,11 @@ def rota_cliente_lookup():
             return jsonify({"error": "Parâmetro 'query' é obrigatório."}), 400
 
         url = f"{HOST}/cliente"
-        headers = {"Authorization": TOKEN, "Content-Type": "application/json", "ixcsoft": "listar"}
+        headers = {
+            "Authorization": TOKEN,
+            "Content-Type": "application/json",
+            "ixcsoft": "listar"
+        }
 
         def format_cpf_cnpj(value):
             value = re.sub(r"\D", "", value)
@@ -238,10 +180,17 @@ def rota_cliente_lookup():
         def call_ixc(qtype_inner, query_inner):
             if qtype_inner == "cnpj_cpf":
                 query_inner = format_cpf_cnpj(query_inner)
-            payload = {"qtype": qtype_inner, "query": query_inner, "oper": "=", "page": "1", "rp": "1"}
+            payload = {
+                "qtype": qtype_inner,
+                "query": query_inner,
+                "oper": "=",
+                "page": "1",
+                "rp": "1"
+            }
             try:
                 resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=30)
-                return resp.json(), payload, None
+                data = resp.json()
+                return data, payload, None
             except Exception as e:
                 return None, payload, str(e)
 
@@ -270,13 +219,17 @@ def rota_cliente_lookup():
                     if total > 0:
                         break
         if total == 0:
-            return jsonify({"error": "Nenhum registro encontrado em cliente.", "tried_payloads": tried}), 400
+            return jsonify({
+                "error": "Nenhum registro encontrado em cliente.",
+                "tried_payloads": tried
+            }), 400
         return jsonify(data["registros"][0])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
 def rota_contrato_lookup():
+    # -> mesma implementação do seu app
     try:
         payload = request.get_json() or {}
         qtype = payload.get("qtype")
@@ -293,7 +246,13 @@ def rota_contrato_lookup():
 
         page = payload.get("page", "1")
         rp = payload.get("rp", "50")
-        q = {"qtype": qtype, "query": str(query), "oper": "=", "page": str(page), "rp": str(rp)}
+        q = {
+            "qtype": qtype,
+            "query": str(query),
+            "oper": "=",
+            "page": str(page),
+            "rp": str(rp)
+        }
         headers_listar = {**HEADERS, "ixcsoft": "listar"}
         res = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(q), timeout=30)
         try:
@@ -307,6 +266,7 @@ def rota_contrato_lookup():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+# get_login_id (mesma implementação robusta que você já tem)
 def get_login_id(contract_id):
     try:
         payload = {"qtype": "id_contrato", "query": str(contract_id), "oper": "=", "page": "1", "rp": "1"}
@@ -321,7 +281,6 @@ def get_login_id(contract_id):
             return None, "Login não encontrado para o contrato"
 
         registro = data["registros"][0]
-        # tenta diferentes chaves que podem conter o id-login
         for key in ("id_login", "id", "ID", "login"):
             val = registro.get(key)
             if val is not None and str(val).strip() != "":
@@ -332,15 +291,20 @@ def get_login_id(contract_id):
     except Exception as e:
         return None, str(e)
 
+# --------------------------
+# Rota principal: transfer (corrigida para lat/lng)
+# --------------------------
 @app.route("/api/transfer", methods=["POST", "OPTIONS"])
 def rota_transfer():
     try:
         data = request.get_json() or {}
+
         id_cliente = data.get("clientId") or data.get("id_cliente")
         id_contrato = data.get("contractId") or data.get("id_contrato")
         if not id_cliente or not id_contrato:
             return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
 
+        # Campos básicos
         id_tecnico = data.get("id_tecnico") or "147"
         nome_cliente = data.get("nome_cliente") or ""
         telefone = data.get("telefone") or ""
@@ -357,19 +321,21 @@ def rota_transfer():
         cidade = data.get("cidade") or data.get("city") or ""
         complemento = data.get("complemento") or data.get("complement") or ""
 
+        # campos antigos
         endereco_antigo = data.get("oldAddress") or data.get("endereco_antigo") or ""
         numero_antigo = data.get("oldNumber") or data.get("old_numero") or ""
         bairro_antigo = data.get("oldNeighborhood") or data.get("old_bairro") or ""
         cep_antigo = data.get("oldCep") or ""
         cidade_antiga = data.get("oldCity") or ""
+
         des_porta = data.get("portaNumber") or data.get("des_porta") or ""
 
-        # aceita diferentes nomes para lat/lng
+        # --- lat/lng/city_ibge: aceita varias chaves vindas do frontend ou do serviço de CEP
         lat = data.get("lat") or data.get("latitude") or None
         lng = data.get("lng") or data.get("longitude") or None
         city_ibge = data.get("city_ibge") or data.get("cityIbge") or data.get("city_ibge_code") or None
 
-        # fallback geocode se permitido
+        # Se não tiver lat/lng e geocode ativado, tenta geocoding (cuidado com rate limits)
         if (not lat or not lng) and GEOCODE_ENABLED:
             try:
                 lat_g, lng_g = geocode_address(endereco, cidade or None, data.get("state") or None)
@@ -381,10 +347,12 @@ def rota_transfer():
 
         print("DEBUG: transfer incoming lat/lng:", lat, lng, "city_ibge:", city_ibge)
 
+        # 1) obter id_login
         id_login, err_login = get_login_id(id_contrato)
         if err_login:
             return jsonify({"error": err_login}), 400
 
+        # 2) criar ticket de transferência
         mensagem = f"""\n\n
 Quem receberá: {nome_cliente}
 Contato: {telefone}
@@ -415,12 +383,16 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
             "setor": "3"
         }
 
+        print("DEBUG: payload_ticket:", json.dumps(payload_ticket, ensure_ascii=False))
         resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        print("DEBUG: resp_ticket.status_code:", resp_ticket.status_code)
+        print("DEBUG: resp_ticket.text:", resp_ticket.text)
         if resp_ticket.status_code != 200:
             return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
         ticket_data = resp_ticket.json()
         id_ticket = ticket_data.get("id")
 
+        # 3) buscar OS do ticket
         payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
         headers_listar = {**HEADERS, "ixcsoft": "listar"}
         resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers=headers_listar, data=json.dumps(payload_busca_os), timeout=30)
@@ -430,6 +402,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         id_os = os_data["registros"][0]["id"]
         mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
 
+        # 4) agendar OS de transferência (PUT)
         payload_agenda = {
             "tipo": "C",
             "id": id_os,
@@ -458,6 +431,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         if resp_put.status_code != 200:
             return jsonify({"error": f"Erro ao agendar OS: {resp_put.status_code} - {resp_put.text}"}), 400
 
+        # 5) gerar protocolo e criar OS de desativação
         resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
         protocolo = resp_proto.text
 
@@ -490,8 +464,9 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         if resp_des.status_code != 200:
             return jsonify({"error": f"Erro ao criar OS desativação: {resp_des.status_code} - {resp_des.text}"}), 400
 
-        # atualizar contrato (GET + PUT) — adiciona latitude/longitude/city_ibge/complemento quando vierem
+        # 6) atualizar contrato (buscar + PUT) - agora incluindo latitude/longitude/city_ibge/complemento
         payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
+        headers_listar = {**HEADERS, "ixcsoft": "listar"}
         res_contrato = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(payload_get), timeout=30)
         contrato_data = res_contrato.json()
         if "registros" not in contrato_data or len(contrato_data["registros"]) == 0:
@@ -505,6 +480,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         registro["cidade"] = cidade
         registro["complemento"] = complemento
 
+        # ADICIONA latitude/longitude/city_ibge se vieram
         if lat:
             registro["latitude"] = lat
         if lng:
@@ -512,6 +488,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         if city_ibge:
             registro["city_ibge"] = city_ibge
 
+        # Datas
         def try_format(field, fmt="%d/%m/%Y"):
             if field in registro and registro[field]:
                 try:
@@ -549,7 +526,10 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         print("EXCEPTION:", str(e))
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
+# --------------------------
+# Endpoint dedicado para atualizar contrato (separado)
+# --------------------------
+""" @app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
 def rota_update_contrato():
     try:
         data = request.get_json() or {}
@@ -557,6 +537,7 @@ def rota_update_contrato():
         if not id_contrato:
             return jsonify({"error": "ID do contrato (contractId) é obrigatório."}), 400
 
+        # Recebe campos do payload
         endereco = data.get("address") or data.get("endereco") or ""
         numero = data.get("number") or data.get("numero") or ""
         bairro = data.get("neighborhood") or data.get("bairro") or ""
@@ -569,6 +550,7 @@ def rota_update_contrato():
         motivo_cancelamento = data.get("motivo_cancelamento", " ")
         complemento = data.get("complement") or data.get("complemento") or "" 
 
+        # Buscar contrato atual
         payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
         headers_listar = {**HEADERS, "ixcsoft": "listar"}
         res = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(payload_get), timeout=30)
@@ -577,11 +559,14 @@ def rota_update_contrato():
             return jsonify({"error": "Contrato não encontrado"}), 400
 
         registro = contrato_data["registros"][0]
+
+        # Atualizar campos do contrato
         registro["endereco"] = endereco
         registro["numero"] = numero
         registro["bairro"] = bairro
         registro["cep"] = cep
         registro["cidade"] = cidade
+
         registro["complemento"] = complemento 
         registro["estado"] = estado
         if latitude:
@@ -591,6 +576,7 @@ def rota_update_contrato():
         if city_ibge:
             registro["city_ibge"] = city_ibge
 
+        # Função para formatar datas
         def try_format(field, fmt="%d/%m/%Y"):
             if field in registro and registro[field]:
                 try:
@@ -610,17 +596,133 @@ def rota_update_contrato():
         if "ultima_atualizacao" in registro:
             registro.pop("ultima_atualizacao", None)
 
+        print("ATUALIZANDO CONTRATO:", json.dumps(registro, ensure_ascii=False, indent=2))
+
+        # Enviar PUT para atualizar contrato
         url_put = f"{HOST}/cliente_contrato/{id_contrato}"
         headers_put = {"Content-Type": "application/json", "Authorization": TOKEN}
         res_put = requests.put(url_put, headers=headers_put, data=json.dumps(registro), timeout=30)
         if res_put.status_code != 200:
             return jsonify({"error": f"Erro ao atualizar contrato: {res_put.status_code} - {res_put.text}"}), 400
 
-        confirm_res = requests.post(f"{HOST}/cliente_contrato", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_get), timeout=30)
         return jsonify({"message": "Contrato atualizado com sucesso", "put_response": res_put.json()}), 200
 
     except Exception as e:
         print("EXCEPTION update_contrato:", str(e))
+        return jsonify({"error": str(e)}), 500 """
+@app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
+def rota_update_contrato():
+    try:
+        data = request.get_json() or {}
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_contrato:
+            return jsonify({"error": "ID do contrato (contractId / id_contrato) é obrigatório."}), 400
+
+        # Campos opcionais do frontend
+        endereco = data.get("address") or data.get("endereco")
+        numero = data.get("number") or data.get("numero")
+        bairro = data.get("neighborhood") or data.get("bairro")
+        cep_input = data.get("cep")
+        cidade = data.get("cidade") or data.get("city")
+        estado = data.get("state") or data.get("estado")
+        lat = data.get("lat") or data.get("latitude")
+        lng = data.get("lng") or data.get("longitude")
+        city_ibge = data.get("city_ibge") or data.get("cityIbge")
+        complemento = data.get("complement") or data.get("complemento")
+
+        # 1) Buscar contrato atual
+        payload_get = {"qtype": "id", "query": str(id_contrato), "oper": "=", "page": "1", "rp": "1"}
+        headers_listar = {"Content-Type": "application/json", "Authorization": TOKEN, "ixcsoft": "listar"}
+        resp_get = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(payload_get), timeout=30)
+        dados = resp_get.json()
+
+        if "registros" not in dados or not dados["registros"]:
+            return jsonify({"error": "Contrato não encontrado no IXC."}), 404
+
+        registro = dados["registros"][0]
+
+        # 2) Atualizar apenas campos recebidos
+        if endereco: registro["endereco"] = endereco
+        if numero: registro["numero"] = numero
+        if bairro: registro["bairro"] = bairro
+        if cidade: registro["cidade"] = str(cidade)
+        if estado: registro["estado"] = estado
+        if complemento: registro["complemento"] = complemento
+        if lat: registro["latitude"] = lat
+        if lng: registro["longitude"] = lng
+        if city_ibge: registro["city_ibge"] = city_ibge
+
+        # 3) CEP: enviar apenas se válido (8 dígitos) e formatado com "-"
+        def clean_digits(s): return re.sub(r"\D", "", str(s or ""))
+        def all_zeros(s): return s != "" and set(s) == {"0"}
+
+        if cep_input:
+            cep_digits = clean_digits(cep_input)
+            if cep_digits and len(cep_digits) == 8 and not all_zeros(cep_digits):
+                registro["cep"] = f"{cep_digits[:5]}-{cep_digits[5:]}"  # garante XXXXX-XXX
+        else:
+            cep_atual = clean_digits(registro.get("cep", ""))
+            if cep_atual and len(cep_atual) == 8 and not all_zeros(cep_atual):
+                registro["cep"] = f"{cep_atual[:5]}-{cep_atual[5:]}"
+            else:
+                registro.pop("cep", None)
+
+        # 4) Campos obrigatórios como string
+        for key in ["id_filial", "id_cliente", "id_tipo_contrato", "id_vd_contrato", "id_modelo"]:
+            registro[key] = str(registro.get(key, "") or "1")
+
+        # 5) Motivo cancelamento fixo
+        registro["motivo_cancelamento"] = " "
+
+        # 6) Formatar datas
+        def fmt_date(field, fmt="%d/%m/%Y"):
+            try:
+                if registro.get(field):
+                    return pd.to_datetime(registro[field]).strftime(fmt)
+            except Exception:
+                pass
+            return registro.get(field, "")
+
+        registro["data"] = fmt_date("data")
+        registro["data_expiracao"] = fmt_date("data_expiracao")
+        registro["data_ativacao"] = fmt_date("data_ativacao")
+        registro["data_renovacao"] = fmt_date("data_renovacao")
+        registro["data_cadastro_sistema"] = fmt_date("data_cadastro_sistema", "%d/%m/%Y %H:%M:%S")
+
+        # 7) Ajustes finais
+        registro["endereco_padrao_cliente"] = "N"
+        registro["ultima_atualizacao"] = "CURRENT_TIMESTAMP"
+
+        # 8) Remover campos problemáticos
+        for f in ("interacao_pendente", "imp_obs", "imp_importacao", "document_photo", "selfie_photo"):
+            registro.pop(f, None)
+
+        # 9) Log para debug
+        print("=== PUT /cliente_contrato payload ===")
+        print(json.dumps(registro, ensure_ascii=False, indent=2))
+        print("====================================")
+
+        # 10) Enviar PUT
+        url_put = f"{HOST}/cliente_contrato/{id_contrato}"
+        headers_put = {"Content-Type": "application/json", "Authorization": TOKEN}
+        resp_put = requests.put(url_put, headers=headers_put, data=json.dumps(registro), timeout=30)
+
+        try:
+            resp_json = resp_put.json()
+        except Exception:
+            resp_json = {"type": "error", "message": "Resposta IXC não-JSON", "raw": resp_put.text}
+
+        if resp_put.status_code != 200 or resp_json.get("type") == "error":
+            return jsonify({
+                "erro": "Falha ao atualizar contrato no IXC",
+                "status_code": resp_put.status_code,
+                "resposta": resp_json
+            }), 400
+
+        return jsonify({"mensagem": "Contrato atualizado com sucesso", "resposta": resp_json}), 200
+
+    except Exception as e:
+        print("EXCEPTION /update_contrato:", str(e))
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
