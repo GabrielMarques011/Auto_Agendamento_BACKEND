@@ -177,9 +177,8 @@ def listar_condominios():
         except Exception:
             return jsonify({"error": "Resposta inválida do IXC", "raw": resp.text}), 500
 
-        # Retornar só registros para o frontend consumir facilmente
         registros = data.get("registros") or []
-        # Mapeia para id + nome + endereco (opcional) para facilitar o select
+        # Mapeia os campos úteis (inclui cep e id_cidade agora)
         simplified = []
         for r in registros:
             simplified.append({
@@ -187,12 +186,16 @@ def listar_condominios():
                 "condominio": r.get("condominio"),
                 "endereco": r.get("endereco"),
                 "numero": r.get("numero"),
-                "bairro": r.get("bairro")
+                "bairro": r.get("bairro"),
+                "cep": r.get("cep"),
+                "id_cidade": r.get("id_cidade"),
+                "bloco_unico": r.get("bloco_unico")
             })
         return jsonify({"total": data.get("total", 0), "registros": simplified}), 200
     except Exception as e:
         print("EXCEPTION /api/condominios:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------
 # Rotas (omito partes não alteradas para brevidade) - manter o resto igual ao seu app
@@ -403,29 +406,63 @@ def rota_transfer():
         if err_login:
             return jsonify({"error": err_login}), 400
 
-        # 2) criar ticket de transferência
+        # --- preparar data e formato amigável para a mensagem ---
+        date_display = ""
+        if scheduledDate:
+            try:
+                # aceita formatos como "2025-10-18", "2025-10-18 10:00:00" ou "2025-10-18T10:00:00"
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                # fallback: usa o valor recebido, mas tenta ajeitar string para leitura
+                date_display = str(scheduledDate)
+
+        # normaliza o período para apresentação (Comercial / Manhã / Tarde)
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # formata o CEP para exibição (XXXXX-XXX) se vier somente dígitos
+        cep_display = cep or ""
+        try:
+            cep_digits = re.sub(r"\D", "", str(cep_display or ""))
+            if len(cep_digits) == 8:
+                cep_display = f"{cep_digits[:5]}-{cep_digits[5:]}"
+        except Exception:
+            pass
+
+        # 2) criar ticket de transferência (mensagem formatada)
         mensagem = f"""\n\n
 Quem receberá: {nome_cliente}
 Contato: {telefone}
 Títular/Responsável Legal: {nome_cliente}
 Valor: {valor}
-Data/Período: {data_str} - {period}
+Data/Período: {date_display} - {period_display}
 *Qualquer valor referente ao serviço deverá ser pago no momento da visita técnica, cliente ciente.
 
 Cliente solicita transferência de endereço.
 Endereço atual/Desativação de porta: {endereco_antigo}, {numero_antigo} - {bairro_antigo} / {des_porta}
-Novo endereço: {endereco}, {numero} - {bairro}, {cep}
+Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
 """.strip()
+
+        # 5) gerar protocolo e criar OS de desativação (obs: você já gerava protocolo aqui anteriormente)
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
 
         payload_ticket = {
             "tipo": "C",
+            "protocolo": protocoloAtendimento,
             "id_cliente": id_cliente,
             "id_login": id_login,
             "id_contrato": id_contrato,
-            "id_assunto": "80",
             "menssagem": mensagem,
-            "origem_endereco": "CC",
             "id_responsavel_tecnico": id_tecnico,
+
+            "id_resposta": "88",
+            "id_ticket_origem": "I",
+
+            "id_assunto": "80",
+            "origem_endereco": "CC",
             "titulo": "Transferência de endereço",
             "su_status": "AG",
             "id_ticket_setor": "3",
@@ -457,6 +494,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
         payload_agenda = {
             "tipo": "C",
             "id": id_os,
+            "id_ticket": id_ticket,
             "id_cliente": id_cliente,
             "id_login": id_login,
             "id_contrato_kit": id_contrato,
@@ -593,6 +631,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep}
     except Exception as e:
         print("EXCEPTION:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------
 # Endpoint dedicado para atualizar contrato (separado) - agora aceita condominio/bloco/apartamento
