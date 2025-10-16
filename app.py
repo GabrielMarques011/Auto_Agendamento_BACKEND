@@ -524,6 +524,8 @@ Endereço atual/Desativação de porta: {endereco_antigo}, {numero_antigo} - {ba
 Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
 """.strip()
 
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")  # puxando o ID do Login
+
         resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
         protocoloAtendimento = resp_proto.text
 
@@ -534,7 +536,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "id_login": id_login,
             "id_contrato": id_contrato,
             "menssagem": mensagem,
-            "id_responsavel_tecnico": id_tecnico,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
             "melhor_horario_reserva": melhor_horario_agenda_val,
             "id_resposta": "88",
             "id_ticket_origem": "I",
@@ -547,6 +549,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "id_wfl_processo": "8",
             "setor": "3"
         }
+
 
         resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
         if resp_ticket.status_code != 200:
