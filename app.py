@@ -401,6 +401,33 @@ def rota_transfer():
         period = data.get("period") or data.get("periodo") or ""
         data_str = format_date_br_with_time(scheduledDate, period)
 
+        # --- melhor horário/reserva (aceita várias chaves do frontend)
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")  # alias se algum frontend enviar diferente
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        # se vier já como 'M'/'T' etc, aceita diretamente (case-insensitive)
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+
         endereco = data.get("address") or data.get("endereco") or ""
         numero = data.get("number") or data.get("numero") or ""
         bairro = data.get("neighborhood") or data.get("bairro") or ""
@@ -508,6 +535,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "id_contrato": id_contrato,
             "menssagem": mensagem,
             "id_responsavel_tecnico": id_tecnico,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
             "id_resposta": "88",
             "id_ticket_origem": "I",
             "id_assunto": "80",
@@ -544,7 +572,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "id_login": id_login,
             "id_contrato_kit": id_contrato,
             "id_tecnico": id_tecnico,
-            "melhor_horario_agenda": "Q",
+            "melhor_horario_agenda": melhor_horario_agenda_val,
             "status": "AG",
             "id_filial": 2,
             "id_assunto": 258,
