@@ -172,7 +172,7 @@ def listar_condominios():
     """
     try:
         page = request.args.get("page", "1")
-        rp = request.args.get("rp", "200")  # buscar até 200 por padrão
+        rp = request.args.get("rp", "9999")
         qtype = request.args.get("qtype", "")
         query = request.args.get("query", "")
 
@@ -757,17 +757,18 @@ def rota_update_contrato():
 
         # limpar campos se não for condomínio (quando explicitamente false)
         if is_condominio is False:
-            registro["id_condominio"] = "1234"
-            registro["bloco"] = "1234"
-            registro["apartamento"] = "1234"
+            registro["id_condominio"] = ""
+            registro["bloco"] = ""
+            registro["apartamento"] = ""
         else:
-            # só atualiza se vier algo do frontend
+            # só atualiza se vier algo do frontend (mesma lógica existente)
             if condominio_id is not None:
                 registro["id_condominio"] = str(condominio_id)
             if bloco is not None:
                 registro["bloco"] = str(bloco)
             if apartamento is not None:
                 registro["apartamento"] = str(apartamento)
+
 
         # 3) CEP: enviar apenas se válido (8 dígitos) e formatado com "-"
         def clean_digits(s): return re.sub(r"\D", "", str(s or ""))
