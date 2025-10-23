@@ -288,7 +288,7 @@ def rota_cliente_lookup():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
+""" @app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
 def rota_contrato_lookup():
     try:
         payload = request.get_json() or {}
@@ -341,6 +341,155 @@ def rota_contrato_lookup():
         }
 
         # Nota: devolvemos 200 mesmo se não houver contratos ativos (frontend pode lidar com array vazio)
+        return jsonify(response_payload), 200
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500 """
+
+@app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
+def rota_contrato_lookup():
+    try:
+        payload = request.get_json() or {}
+        qtype = payload.get("qtype")
+        query = (
+            payload.get("query")
+            or payload.get("contractId")
+            or payload.get("id_contrato")
+            or payload.get("clientId")
+            or payload.get("id_cliente")
+        )
+
+        if not qtype:
+            if payload.get("clientId") or payload.get("id_cliente"):
+                qtype = "id_cliente"
+                query = payload.get("clientId") or payload.get("id_cliente")
+            else:
+                qtype = "id"
+                query = payload.get("contractId") or payload.get("id_contrato") or payload.get("query")
+
+        if not query:
+            return jsonify({"error": "Parâmetro 'query' (contractId ou clientId) é obrigatório."}), 400
+
+        page = payload.get("page", "1")
+        rp = payload.get("rp", "50")
+        q = {
+            "qtype": qtype,
+            "query": str(query),
+            "oper": "=",
+            "page": str(page),
+            "rp": str(rp)
+        }
+
+        headers_listar = {**HEADERS, "ixcsoft": "listar"}
+        res = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(q), timeout=30)
+
+        try:
+            data = res.json()
+        except Exception:
+            return jsonify({"error": f"Erro ao interpretar resposta do IXC: {res.status_code} - {res.text}"}), 400
+
+        registros_orig = data.get("registros") or []
+
+        # -----------------------
+        # Funções utilitárias
+        # -----------------------
+        def extract_status_code(r):
+            try:
+                s = (
+                    r.get("status")
+                    or r.get("situacao")
+                    or r.get("st")
+                    or r.get("status_contrato")
+                    or r.get("statusContrato")
+                    or r.get("status_internet")
+                    or ""
+                )
+                s = str(s).strip().upper()
+                return s[:1] if s else ""
+            except Exception:
+                return ""
+
+        def is_endereco_padrao_s(r):
+            try:
+                v = r.get("endereco_padrao_cliente") or r.get("endereco_padrao") or r.get("enderecoPadrao") or ""
+                s = str(v).strip().upper()
+                return s in ("S", "1", "TRUE", "T", "SIM", "Y")
+            except Exception:
+                return False
+
+        def has_any_address_info(r):
+            for k in ("endereco_novo", "novo_endereco", "endereco", "address", "logradouro"):
+                if r.get(k):
+                    return True
+            for k in ("cep_novo", "cep", "CEP", "Cep"):
+                if r.get(k):
+                    return True
+            return False
+
+        # -----------------------
+        # Fallback: preenche endereço do cliente se necessário
+        # -----------------------
+        enriched_registros = []
+        for r in registros_orig:
+            registro = dict(r)
+
+            try:
+                if is_endereco_padrao_s(registro) and not has_any_address_info(registro):
+                    id_cliente = registro.get("id_cliente") or registro.get("id")
+                    if id_cliente:
+                        payload_cliente = {
+                            "qtype": "id",
+                            "query": str(id_cliente),
+                            "oper": "=",
+                            "page": "1",
+                            "rp": "1"
+                        }
+                        resp_cli = requests.post(
+                            f"{HOST}/cliente",
+                            headers=headers_listar,
+                            data=json.dumps(payload_cliente),
+                            timeout=30
+                        )
+                        try:
+                            data_cli = resp_cli.json()
+                        except Exception:
+                            data_cli = None
+
+                        if data_cli and data_cli.get("registros"):
+                            cli = data_cli["registros"][0]
+                            endereco_cli = cli.get("endereco") or cli.get("address") or cli.get("logradouro") or ""
+                            numero_cli = cli.get("numero") or cli.get("number") or cli.get("nro") or ""
+                            bairro_cli = cli.get("bairro") or cli.get("neighborhood") or ""
+                            cep_cli = cli.get("cep") or cli.get("CEP") or ""
+                            complemento_cli = cli.get("complemento") or cli.get("complement") or ""
+
+                            if endereco_cli:
+                                registro["endereco_novo"] = registro.get("endereco_novo") or endereco_cli
+                            if numero_cli:
+                                registro["numero_novo"] = registro.get("numero_novo") or numero_cli
+                            if bairro_cli:
+                                registro["bairro_novo"] = registro.get("bairro_novo") or bairro_cli
+                            if cep_cli:
+                                registro["cep_novo"] = registro.get("cep_novo") or cep_cli
+                            if complemento_cli:
+                                registro["complemento_novo"] = registro.get("complemento_novo") or complemento_cli
+            except Exception:
+                pass
+
+            enriched_registros.append(registro)
+
+        # -----------------------
+        # Filtra contratos válidos (exclui Desistido/Inativo)
+        # -----------------------
+        registros_filtrados = [
+            r for r in enriched_registros if extract_status_code(r) not in ("D", "I")
+        ]
+
+        response_payload = {
+            "total": len(registros_filtrados),
+            "registros": registros_filtrados
+        }
+
         return jsonify(response_payload), 200
 
     except Exception as e:
@@ -744,16 +893,34 @@ def rota_update_contrato():
 
         registro = dados["registros"][0]
 
-        # 2) Atualizar apenas campos recebidos
-        if endereco is not None: registro["endereco"] = endereco
-        if numero is not None: registro["numero"] = numero
-        if bairro is not None: registro["bairro"] = bairro
-        if cidade is not None: registro["cidade"] = str(cidade)
-        if estado is not None: registro["estado"] = estado
-        if complemento is not None: registro["complemento"] = complemento
-        if lat is not None: registro["latitude"] = lat
-        if lng is not None: registro["longitude"] = lng
-        if city_ibge is not None: registro["city_ibge"] = city_ibge
+        # extrai id do cliente para possível sincronização com tabela cliente
+        id_cliente = registro.get("id_cliente") or registro.get("id") and None  # fallback se campo diferente
+        # se não encontrou id_cliente diretamente, tenta outras chaves comuns
+        if not id_cliente:
+            for k in ("id_cliente", "id_cliente_contrato", "id_cliente_fk", "cliente_id"):
+                if registro.get(k):
+                    id_cliente = registro.get(k)
+                    break
+
+        # 2) Atualizar apenas campos recebidos (no contrato)
+        if endereco is not None:
+            registro["endereco"] = endereco
+        if numero is not None:
+            registro["numero"] = numero
+        if bairro is not None:
+            registro["bairro"] = bairro
+        if cidade is not None:
+            registro["cidade"] = str(cidade)
+        if estado is not None:
+            registro["estado"] = estado
+        if complemento is not None:
+            registro["complemento"] = complemento
+        if lat is not None:
+            registro["latitude"] = lat
+        if lng is not None:
+            registro["longitude"] = lng
+        if city_ibge is not None:
+            registro["city_ibge"] = city_ibge
 
         # limpar campos se não for condomínio (quando explicitamente false)
         if is_condominio is False:
@@ -761,7 +928,7 @@ def rota_update_contrato():
             registro["bloco"] = ""
             registro["apartamento"] = ""
         else:
-            # só atualiza se vier algo do frontend (mesma lógica existente)
+            # só atualiza se vier algo do frontend
             if condominio_id is not None:
                 registro["id_condominio"] = str(condominio_id)
             if bloco is not None:
@@ -769,6 +936,18 @@ def rota_update_contrato():
             if apartamento is not None:
                 registro["apartamento"] = str(apartamento)
 
+        # ---------- Antes de enviar o PUT do contrato, descobrir quantos contratos o cliente tem ----------
+        contrato_count = None
+        try:
+            if id_cliente:
+                q_count = {"qtype": "id_cliente", "query": str(id_cliente), "oper": "=", "page": "1", "rp": "1"}
+                resp_count = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(q_count), timeout=30)
+                data_count = resp_count.json()
+                contrato_count = int(data_count.get("total") or 0)
+                print(f"DEBUG: cliente {id_cliente} possui {contrato_count} contratos (total reportado).")
+        except Exception as e:
+            print("WARN: falha ao obter quantidade de contratos do cliente:", e)
+            contrato_count = None
 
         # 3) CEP: enviar apenas se válido (8 dígitos) e formatado com "-"
         def clean_digits(s): return re.sub(r"\D", "", str(s or ""))
@@ -820,7 +999,7 @@ def rota_update_contrato():
         print(json.dumps(registro, ensure_ascii=False, indent=2))
         print("====================================")
 
-        # 10) Enviar PUT
+        # 10) Enviar PUT para atualizar o contrato
         url_put = f"{HOST}/cliente_contrato/{id_contrato}"
         headers_put = {"Content-Type": "application/json", "Authorization": TOKEN}
         resp_put = requests.put(url_put, headers=headers_put, data=json.dumps(registro), timeout=30)
@@ -837,11 +1016,119 @@ def rota_update_contrato():
                 "resposta": resp_json
             }), 400
 
-        return jsonify({"mensagem": "Contrato atualizado com sucesso", "resposta": resp_json}), 200
+        # --------------------------------------------------------------------
+        # 11) Se o cliente tem apenas 1 contrato ativo, atualiza também a tabela /cliente
+        # --------------------------------------------------------------------
+        try:
+            contrato_count = None
+            if id_cliente:
+                try:
+                    # pede muitos registros para podermos filtrar localmente por status
+                    q_count = {"qtype": "id_cliente", "query": str(id_cliente), "oper": "=", "page": "1", "rp": "9999"}
+                    resp_count = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(q_count), timeout=30)
+                    data_count = resp_count.json()
+                    registros = data_count.get("registros") or []
+
+                    def is_active_contract_local(r):
+                        try:
+                            s = (r.get("status") or r.get("situacao") or r.get("st") or "")
+                            return str(s).strip().upper() == "A"
+                        except Exception:
+                            return False
+
+                    ativos = [r for r in registros if is_active_contract_local(r)]
+                    contrato_count = len(ativos)
+                    print(f"DEBUG: cliente {id_cliente} possui {len(registros)} contratos (raw) e {contrato_count} contratos ativos.")
+                except Exception as e:
+                    print("WARN: falha ao obter quantidade de contratos do cliente:", e)
+                    contrato_count = None
+
+            # só sincroniza cliente se houver exatamente 1 contrato ativo
+            if contrato_count == 1 and id_cliente:
+                # buscar cliente atual
+                payload_cliente_get = {"qtype": "id", "query": str(id_cliente), "oper": "=", "page": "1", "rp": "1"}
+                resp_cliente_get = requests.post(f"{HOST}/cliente", headers=headers_listar, data=json.dumps(payload_cliente_get), timeout=30)
+                cliente_data = resp_cliente_get.json()
+                if "registros" in cliente_data and cliente_data["registros"]:
+                    registro_cliente = cliente_data["registros"][0]
+
+                    # atualiza somente os campos recebidos (mesma lógica do contrato)
+                    if endereco is not None:
+                        registro_cliente["endereco"] = endereco
+                    if numero is not None:
+                        registro_cliente["numero"] = numero
+                    if bairro is not None:
+                        registro_cliente["bairro"] = bairro
+                    if cidade is not None:
+                        registro_cliente["cidade"] = str(cidade)
+                    if estado is not None:
+                        registro_cliente["estado"] = estado
+                    if complemento is not None:
+                        registro_cliente["complemento"] = complemento
+                    if lat is not None:
+                        registro_cliente["latitude"] = lat
+                    if lng is not None:
+                        registro_cliente["longitude"] = lng
+                    if city_ibge is not None:
+                        registro_cliente["city_ibge"] = city_ibge
+
+                    # condomínio no cliente
+                    if is_condominio is False:
+                        registro_cliente["id_condominio"] = ""
+                        registro_cliente["bloco"] = ""
+                        registro_cliente["apartamento"] = ""
+                    else:
+                        if condominio_id is not None:
+                            registro_cliente["id_condominio"] = str(condominio_id)
+                        if bloco is not None:
+                            registro_cliente["bloco"] = str(bloco)
+                        if apartamento is not None:
+                            registro_cliente["apartamento"] = str(apartamento)
+
+                    # CEP cliente: mesma formatação/validação
+                    if cep_input:
+                        cep_digits = clean_digits(cep_input)
+                        if cep_digits and len(cep_digits) == 8 and not all_zeros(cep_digits):
+                            registro_cliente["cep"] = f"{cep_digits[:5]}-{cep_digits[5:]}"
+                    else:
+                        cep_atual_cliente = clean_digits(registro_cliente.get("cep", ""))
+                        if cep_atual_cliente and len(cep_atual_cliente) == 8 and not all_zeros(cep_atual_cliente):
+                            registro_cliente["cep"] = f"{cep_atual_cliente[:5]}-{cep_atual_cliente[5:]}"
+                        else:
+                            registro_cliente.pop("cep", None)
+
+                    # limpa campos problemáticos no cliente (mesma lista)
+                    for f in ("interacao_pendente", "imp_obs", "imp_importacao", "document_photo", "selfie_photo"):
+                        registro_cliente.pop(f, None)
+
+                    # log e PUT no cliente
+                    print("=== PUT /cliente payload (sync from single-active-contract client) ===")
+                    print(json.dumps(registro_cliente, ensure_ascii=False, indent=2))
+                    print("=====================================================================")
+
+                    url_put_cliente = f"{HOST}/cliente/{id_cliente}"
+                    resp_put_cliente = requests.put(url_put_cliente, headers=headers_put, data=json.dumps(registro_cliente), timeout=30)
+
+                    try:
+                        resp_put_cliente_json = resp_put_cliente.json()
+                    except Exception:
+                        resp_put_cliente_json = {"type": "error", "message": "Resposta IXC não-JSON", "raw": resp_put_cliente.text}
+
+                    if resp_put_cliente.status_code != 200 or resp_put_cliente_json.get("type") == "error":
+                        # não falha todo o fluxo por conta da sync do cliente, apenas loga e retorna aviso parcial
+                        print("WARN: Falha ao atualizar cliente (mesmo após atualizar contrato):", resp_put_cliente.status_code, resp_put_cliente.text)
+                else:
+                    print("DEBUG: Não foi possível obter registro do cliente para sincronização (vazio).")
+        except Exception as e:
+            print("WARN: Erro durante sincronização de /cliente:", e)
+
+        # 12) tudo ok
+        return jsonify({"mensagem": "Contrato atualizado com sucesso (e cliente sincronizado quando aplicável).", "resposta": resp_json}), 200
 
     except Exception as e:
         print("EXCEPTION /update_contrato:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------
 # Execução
