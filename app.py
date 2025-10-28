@@ -715,7 +715,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         id_os = os_data["registros"][0]["id"]
         mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
 
-        # 4) agendar OS
+        # 4) agendar OS (ATUALIZADO: primeiro chama alterar_setor para garantir status/setor, depois faz PUT detalhado)
         payload_agenda = {
             "tipo": "C",
             "id": id_os,
@@ -755,9 +755,56 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             payload_agenda["bloco"] = ""
             payload_agenda["apartamento"] = ""
 
+        # ---- novo: chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        # data no formato "YYYY-MM-DD HH:MM:SS"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": mensagem_atual or payload_agenda.get("mensagem_resposta", ""),
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": payload_agenda.get("latitude", "") or "",
+            "longitude": payload_agenda.get("longitude", "") or "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        # tenta PUT primeiro (conforme atualização do dev)
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            # fallback para POST (observado como funcional nos logs)
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- após garantir setor/status, mantém o PUT detalhado original para gravar endereço/datas/etc. ----
         resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
         if resp_put.status_code != 200:
-            return jsonify({"error": f"Erro ao agendar OS: {resp_put.status_code} - {resp_put.text}"}), 400
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
 
         # 5) OS desativação
         resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
@@ -850,6 +897,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
     except Exception as e:
         print("EXCEPTION:", str(e))
         return jsonify({"error": str(e)}), 500
+
 
 # --------------------------
 # Endpoint dedicado para atualizar contrato (separado) - agora aceita condominio/bloco/apartamento
