@@ -137,29 +137,56 @@ def parse_bool(value):
 @app.route("/api/cep/<cep>", methods=["GET"])
 def buscar_cep(cep):
     try:
-        res = requests.get(f"https://cep.awesomeapi.com.br/json/{cep}")
-        if res.status_code != 200:
-            return jsonify({"error": "CEP não encontrado"}), 404
+        # Tenta AwesomeAPI primeiro
+        res_awesome = requests.get(f"https://cep.awesomeapi.com.br/json/{cep}", timeout=5)
+        
+        if res_awesome.status_code == 200:
+            data = res_awesome.json()
+            city_name = data.get("city")
+            city_id = get_city_id_ixc(city_name)
 
-        data = res.json()
-        city_name = data.get("city")
-        city_id = get_city_id_ixc(city_name)  # pega o ID do IXC
+            return jsonify({
+                "cep": data.get("cep"),
+                "address": data.get("address"),
+                "district": data.get("district"),
+                "city": city_name,
+                "state": data.get("state"),
+                "cityId": str(city_id) if city_id else None,
+                "city_ibge": data.get("city_ibge"),
+                "lat": data.get("lat"),
+                "lng": data.get("lng"),
+                "source": "awesomeapi"
+            }), 200
+        
+        # Se AwesomeAPI falhar, tenta ViaCEP
+        print("AwesomeAPI falhou, tentando ViaCEP...")
+        res_viacep = requests.get(f"https://viacep.com.br/ws/{cep}/json/", timeout=5)
+        
+        if res_viacep.status_code == 200 and not res_viacep.json().get("erro"):
+            data = res_viacep.json()
+            city_name = data.get("localidade")
+            city_id = get_city_id_ixc(city_name)
 
-        result = {
-            "cep": data.get("cep"),
-            "address": data.get("address"),
-            "district": data.get("district"),
-            "city": city_name,
-            "state": data.get("state"),
-            "cityId": str(city_id) if city_id else None,  # retorna string
-            "city_ibge": data.get("city_ibge"),
-            "lat": data.get("lat"),
-            "lng": data.get("lng")
-        }
-        return jsonify(result), 200
+            return jsonify({
+                "cep": data.get("cep"),
+                "address": data.get("logradouro"),
+                "district": data.get("bairro"),
+                "city": city_name,
+                "state": data.get("uf"),
+                "cityId": str(city_id) if city_id else None,
+                "city_ibge": data.get("ibge"),
+                "lat": "",
+                "lng": "",
+                "source": "viacep"
+            }), 200
+        
+        return jsonify({"error": "CEP não encontrado em nenhuma base"}), 404
+        
+    except requests.exceptions.Timeout:
+        return jsonify({"error": "Timeout ao buscar CEP"}), 408
     except Exception as e:
         print("Erro ao buscar CEP:", str(e))
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": "Erro interno do servidor"}), 500
 
 # --------------------------
 # Nova rota: listar condomínios (proxy para IXC)
@@ -706,14 +733,19 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         ticket_data = resp_ticket.json()
         id_ticket = ticket_data.get("id")
 
-        # 3) buscar OS
+        # 3) buscar OS para pegar o PROTOCOLO
         payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
         resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
         os_data = resp_os_busca.json()
         if str(os_data.get("total", 0)) == "0":
             return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        # AQUI ESTÁ A MUDANÇA PRINCIPAL - PEGANDO O PROTOCOLO DA OS
         id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")  # ← NOVO CAMPO ADICIONADO
         mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
 
         # 4) agendar OS (ATUALIZADO: primeiro chama alterar_setor para garantir status/setor, depois faz PUT detalhado)
         payload_agenda = {
@@ -887,11 +919,13 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         if res_put_endereco.status_code != 200:
             return jsonify({"error": f"Erro ao atualizar contrato: {res_put_endereco.status_code} - {res_put_endereco.text}"}), 400
 
+        # AQUI ESTÁ A MUDANÇA NA RESPOSTA - RETORNANDO O PROTOCOLO DA OS
         return jsonify({
             "message": "Transferência, desativação e atualização do endereço realizadas com sucesso!",
             "id_ticket": id_ticket,
             "id_os_transferencia": id_os,
-            "id_os_desativacao": resp_des.json().get("id")
+            "id_os_desativacao": resp_des.json().get("id"),
+            "protocolo_os": protocolo_os  # ← NOVO CAMPO ADICIONADO NA RESPOSTA
         }), 200
 
     except Exception as e:
