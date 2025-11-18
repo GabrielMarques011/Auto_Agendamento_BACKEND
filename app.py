@@ -70,6 +70,7 @@ def get_city_id_ixc(city_name):
     payload = {"qtype": "nome", "query": city_name, "oper": "=", "page": "1", "rp": "1"}
     registro, err = consultar_ixc_registro("cidade", payload, listar=True)
     if err:
+        print(f"Erro ao buscar cidade: {err}")
         return None
     return registro.get("id") or registro.get("ID") or None
 
@@ -138,7 +139,7 @@ def parse_bool(value):
 def buscar_cep(cep):
     try:
         # Tenta AwesomeAPI primeiro
-        res_awesome = requests.get(f"https://cep.awesomeapi.com.br/json/{cep}", timeout=5)
+        res_awesome = requests.get(f"https://cep.awesomeapi.com.br/json/{cep}", timeout=50)
         
         if res_awesome.status_code == 200:
             data = res_awesome.json()
@@ -160,7 +161,7 @@ def buscar_cep(cep):
         
         # Se AwesomeAPI falhar, tenta ViaCEP
         print("AwesomeAPI falhou, tentando ViaCEP...")
-        res_viacep = requests.get(f"https://viacep.com.br/ws/{cep}/json/", timeout=5)
+        res_viacep = requests.get(f"https://viacep.com.br/ws/{cep}/json/", timeout=450)
         
         if res_viacep.status_code == 200 and not res_viacep.json().get("erro"):
             data = res_viacep.json()
@@ -189,7 +190,7 @@ def buscar_cep(cep):
         return jsonify({"error": "Erro interno do servidor"}), 500
 
 # --------------------------
-# Nova rota: listar condomínios (proxy para IXC)
+# listar condomínios (proxy para IXC)
 # --------------------------
 @app.route("/api/condominios", methods=["GET"])
 def listar_condominios():
@@ -237,7 +238,7 @@ def listar_condominios():
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
-# Rotas (omito partes não alteradas para brevidade) - manter o resto igual ao seu app
+# Rotas de lookup cliente e contrato
 # --------------------------
 @app.route("/api/cliente", methods=["POST", "OPTIONS"])
 def rota_cliente_lookup():
@@ -314,64 +315,6 @@ def rota_cliente_lookup():
         return jsonify(data["registros"][0])
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-
-""" @app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
-def rota_contrato_lookup():
-    try:
-        payload = request.get_json() or {}
-        qtype = payload.get("qtype")
-        query = payload.get("query") or payload.get("contractId") or payload.get("id_contrato") or payload.get("clientId") or payload.get("id_cliente")
-        if not qtype:
-            if payload.get("clientId") or payload.get("id_cliente"):
-                qtype = "id_cliente"
-                query = payload.get("clientId") or payload.get("id_cliente")
-            else:
-                qtype = "id"
-                query = payload.get("contractId") or payload.get("id_contrato") or payload.get("query")
-        if not query:
-            return jsonify({"error": "Parâmetro 'query' (contractId ou clientId) é obrigatório."}), 400
-
-        page = payload.get("page", "1")
-        rp = payload.get("rp", "50")
-        q = {
-            "qtype": qtype,
-            "query": str(query),
-            "oper": "=",
-            "page": str(page),
-            "rp": str(rp)
-        }
-        headers_listar = {**HEADERS, "ixcsoft": "listar"}
-        res = requests.post(f"{HOST}/cliente_contrato", headers=headers_listar, data=json.dumps(q), timeout=30)
-        try:
-            data = res.json()
-        except Exception:
-            return jsonify({"error": f"Erro parse response IXC cliente_contrato: {res.status_code} - {res.text}"}), 400
-
-        # pega registros originais (se houver)
-        registros_orig = data.get("registros") or []
-
-        # Filtra apenas contratos com status 'A'
-        # Aceita variação de nomes de campo: 'status', 'situacao', 'st'
-        def is_active_contract(r):
-            try:
-                s = (r.get("status") or r.get("situacao") or r.get("st") or "")
-                return str(s).strip().upper() == "A"
-            except Exception:
-                return False
-
-        registros_filtrados = [r for r in registros_orig if is_active_contract(r)]
-
-        # Retorna a lista filtrada e total correspondente
-        response_payload = {
-            "total": len(registros_filtrados),
-            "registros": registros_filtrados
-        }
-
-        # Nota: devolvemos 200 mesmo se não houver contratos ativos (frontend pode lidar com array vazio)
-        return jsonify(response_payload), 200
-
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500 """
 
 @app.route("/api/cliente_contrato", methods=["POST", "OPTIONS"])
 def rota_contrato_lookup():
@@ -522,7 +465,7 @@ def rota_contrato_lookup():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# get_login_id (mesma implementação robusta que você já tem)
+# get_login_id
 def get_login_id(contract_id):
     try:
         payload = {"qtype": "id_contrato", "query": str(contract_id), "oper": "=", "page": "1", "rp": "1"}
@@ -548,7 +491,7 @@ def get_login_id(contract_id):
         return None, str(e)
 
 # --------------------------
-# Rota principal: transfer (corrigida para lat/lng) - agora com suporte a condominio
+# Rota principal: transfer
 # --------------------------
 @app.route("/api/transfer", methods=["POST", "OPTIONS"])
 def rota_transfer():
@@ -796,7 +739,7 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
             "id_setor": str(payload_agenda.get("setor", 1)),
             "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
             "id_assunto": str(payload_agenda.get("id_assunto", "")),
-            "mensagem": mensagem_atual or payload_agenda.get("mensagem_resposta", ""),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
             "status": "AG",
             "data": data_now,
             "id_evento": "",
@@ -932,9 +875,8 @@ Novo endereço: {endereco}, {numero} - {bairro}, {cep_display}
         print("EXCEPTION:", str(e))
         return jsonify({"error": str(e)}), 500
 
-
 # --------------------------
-# Endpoint dedicado para atualizar contrato (separado) - agora aceita condominio/bloco/apartamento
+# Endpoint dedicado para atualizar contrato
 # --------------------------
 @app.route("/api/update_contrato", methods=["POST", "OPTIONS"])
 def rota_update_contrato():
@@ -1211,6 +1153,1060 @@ def rota_update_contrato():
         print("EXCEPTION /update_contrato:", str(e))
         return jsonify({"error": str(e)}), 500
 
+# --------------------------
+# Endpoint dedicado para mudança de ponto
+# --------------------------
+@app.route("/api/mudanca", methods=["POST", "OPTIONS"])
+def rota_mudanca():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""MUDANÇA DE PONTO - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Valor: {valor}
+Motivo da Mudança: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "225",
+            "id_ticket_origem": "I",
+            "id_assunto": "259",
+            "origem_endereco": "CC",
+            "titulo": "Mudança de Ponto",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 259,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Mudança de Ponto",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Mudança de ponto agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/mudanca:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
+# Endpoint dedicado para sem conexão
+# --------------------------
+@app.route("/api/semconexao", methods=["POST", "OPTIONS"])
+def rota_semconexao():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""SEM CONEXÃO - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "221",
+            "id_ticket_origem": "I",
+            "id_assunto": "166",
+            "origem_endereco": "CC",
+            "titulo": "Sem Conexão",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "125"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 166,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Sem Conexão",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Sem conexão agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/semconexao:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
+# Endpoint dedicado para lentidão
+# --------------------------
+@app.route("/api/lentidao", methods=["POST", "OPTIONS"])
+def rota_lentidao():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""LENTIDÃO - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "220",
+            "id_ticket_origem": "I",
+            "id_assunto": "167",
+            "origem_endereco": "CC",
+            "titulo": "Lentidão",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "124"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 167,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Lentidão",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Lentidão agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/lentidao:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
+# Endpoint dedicado para quedas de conexão
+# --------------------------
+@app.route("/api/quedas", methods=["POST", "OPTIONS"])
+def rota_quedas():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""QUEDAS - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "229",
+            "id_ticket_origem": "I",
+            "id_assunto": "169",
+            "origem_endereco": "CC",
+            "titulo": "Quedas de Conexão",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "130"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 169,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Quedas de Conexão",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Quedas de Conexão agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/quedas:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
+# Endpoint dedicado para configurações de roteador
+# --------------------------
+@app.route("/api/config", methods=["POST", "OPTIONS"])
+def rota_config():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""CONFIGURAÇÃO DE ROTEADOR - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "231",
+            "id_ticket_origem": "I",
+            "id_assunto": "168",
+            "origem_endereco": "CC",
+            "titulo": "Configuração de Roteador",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "132"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 168,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Configuração de Roteador",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Configuração de roteador agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/config:", str(e))
+        return jsonify({"error": str(e)}), 500
 
 # --------------------------
 # Execução
