@@ -2209,6 +2209,428 @@ Motivo do Agendamento: {observacoes}""".strip()
         return jsonify({"error": str(e)}), 500
 
 # --------------------------
+# Endpoint dedicado para troca de equipamento
+# --------------------------
+@app.route("/api/troca", methods=["POST", "OPTIONS"])
+def rota_troca():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""TROCA DE EQUIPAMENTO - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "222",
+            "id_ticket_origem": "I",
+            "id_assunto": "176",
+            "origem_endereco": "CC",
+            "titulo": "Troca de Equipamento",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "126"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 176,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - Troca de Equipamento",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "Troca de equipamento agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/troca:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
+# Endpoint dedicado para alarmada
+# --------------------------
+@app.route("/api/alarmada", methods=["POST", "OPTIONS"])
+def rota_alarmada():
+    try:
+        data = request.get_json() or {}
+
+        id_cliente = data.get("clientId") or data.get("id_cliente")
+        id_contrato = data.get("contractId") or data.get("id_contrato")
+        if not id_cliente or not id_contrato:
+            return jsonify({"error": "ID do cliente e contrato são obrigatórios."}), 400
+
+        # Campos básicos
+        id_tecnico = data.get("id_tecnico") or "147"
+        nome_cliente = data.get("nome_cliente") or ""
+        telefone = data.get("telefone") or ""
+
+        # --- valor (taxa, renovação ou isento)
+        valueType = (data.get("valueType") or data.get("valor") or "").lower()
+        valor = ""
+        if valueType == "taxa":
+            valor = data.get("taxValue") or ""
+        elif valueType == "renovacao":
+            valor = "Isento mediante a renovação da fidelidade"
+
+        scheduledDate = data.get("scheduledDate")
+        period = data.get("period") or data.get("periodo") or ""
+        data_str = format_date_br_with_time(scheduledDate, period)
+
+        # --- melhor horário/reserva
+        melhor_horario_reserva = (
+            data.get("melhor_horario_reserva")
+            or data.get("melhor_horario_agenda")
+            or data.get("melhor_horario")
+            or data.get("periodo_letra")
+            or ""
+        )
+
+        # Normaliza para as letras esperadas pelo IXC: M / T / N / Q
+        _map_mh = {
+            "manha": "M", "manhã": "M", "m": "M",
+            "tarde": "T", "t": "T",
+            "noite": "N", "n": "N",
+            "comercial": "Q", "comercialmente": "Q",
+            "q": "Q",
+            "": "Q"
+        }
+
+        mh_key = str(melhor_horario_reserva).strip().lower()
+        if mh_key.upper() in ("M", "T", "N", "Q"):
+            melhor_horario_agenda_val = mh_key.upper()
+        else:
+            melhor_horario_agenda_val = _map_mh.get(mh_key, _map_mh.get(mh_key.replace("ã", "a"), "Q"))
+
+        # Dados específicos da mudança de ponto
+        observacoes = data.get("observacoes") or data.get("observacao") or ""
+
+        # 1) obter id_login
+        id_login, err_login = get_login_id(id_contrato)
+        if err_login:
+            return jsonify({"error": err_login}), 400
+
+        # --- formatar data e período
+        date_display = ""
+        if scheduledDate:
+            try:
+                date_part = str(scheduledDate).split("T")[0].split(" ")[0]
+                dt = datetime.strptime(date_part, "%Y-%m-%d")
+                date_display = dt.strftime("%d/%m/%Y")
+            except Exception:
+                date_display = str(scheduledDate)
+
+        period_map = {"comercial": "Comercial", "manha": "Manhã", "tarde": "Tarde"}
+        period_display = period_map.get((period or "").lower(), (period or "").capitalize())
+
+        # 2) criar ticket com a mensagem específica EXATA
+        mensagem = f"""ONU ALARMADA - PRIORIZAR PERÍODO INDICADO
+
+Nome do contato: {nome_cliente}
+Tel: {telefone}
+Data/Período: {date_display} - {period_display}
+Motivo do Agendamento: {observacoes}""".strip()
+
+        id_tecnico_TICKET = str(data.get("id_responsavel_tecnico") or "147")
+
+        resp_proto = requests.post(f"{HOST}/gerar_protocolo_atendimento", headers={**HEADERS, "ixcsoft": "inserir"}, timeout=30)
+        protocoloAtendimento = resp_proto.text
+
+        payload_ticket = {
+            "tipo": "C",
+            "protocolo": protocoloAtendimento,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato": id_contrato,
+            "menssagem": mensagem,
+            "id_responsavel_tecnico": id_tecnico_TICKET,
+            "melhor_horario_reserva": melhor_horario_agenda_val,
+            "id_resposta": "218",
+            "id_ticket_origem": "I",
+            "id_assunto": "170",
+            "origem_endereco": "CC",
+            "titulo": "ONU Alarmada",
+            "su_status": "AG",
+            "id_ticket_setor": "3",
+            "prioridade": "M",
+            "id_wfl_processo": "8",
+            "setor": "3",
+            "id_wfl_processo": "122"
+        }
+
+        resp_ticket = requests.post(f"{HOST}/su_ticket", headers=HEADERS, data=json.dumps(payload_ticket), timeout=30)
+        if resp_ticket.status_code != 200:
+            return jsonify({"error": f"Erro ao criar ticket: {resp_ticket.status_code} - {resp_ticket.text}"}), 400
+        ticket_data = resp_ticket.json()
+        id_ticket = ticket_data.get("id")
+
+        # 3) buscar OS para pegar o PROTOCOLO
+        payload_busca_os = {"qtype": "id_ticket", "query": id_ticket, "oper": "=", "page": "1", "rp": "1"}
+        resp_os_busca = requests.post(f"{HOST}/su_oss_chamado", headers={**HEADERS, "ixcsoft": "listar"}, data=json.dumps(payload_busca_os), timeout=30)
+        os_data = resp_os_busca.json()
+        if str(os_data.get("total", 0)) == "0":
+            return jsonify({"error": "Nenhuma OS encontrada para o ticket criado."}), 400
+        
+        id_os = os_data["registros"][0]["id"]
+        protocolo_os = os_data["registros"][0].get("protocolo", "")
+        mensagem_atual = os_data["registros"][0].get("mensagem") or mensagem
+
+        print(f"DEBUG: Protocolo da OS encontrado: {protocolo_os}")
+
+        # 4) agendar OS com ID do assunto 259
+        payload_agenda = {
+            "tipo": "C",
+            "id": id_os,
+            "id_ticket": id_ticket,
+            "id_cliente": id_cliente,
+            "id_login": id_login,
+            "id_contrato_kit": id_contrato,
+            "id_tecnico": id_tecnico,
+            "melhor_horario_agenda": melhor_horario_agenda_val,
+            "status": "AG",
+            "id_filial": 2,
+            "id_assunto": 170,
+            "setor": 1,
+            "prioridade": "N",
+            "origem_endereco": "CC",
+            "mensagem_resposta": "Agendado via API - ONU Alarmada",
+            "data_agenda": data_str,
+            "data_agenda_final": data_str,
+            "mensagem": mensagem_atual
+        }
+
+        # ---- chamar su_oss_chamado_alterar_setor para garantir status/setor ----
+        alterar_url = f"{HOST}/su_oss_chamado_alterar_setor"
+        data_now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        alterar_payload = {
+            "id_chamado": str(id_os),
+            "id_setor": str(payload_agenda.get("setor", 1)),
+            "id_tecnico": str(payload_agenda.get("id_tecnico") or id_tecnico or ""),
+            "id_assunto": str(payload_agenda.get("id_assunto", "")),
+            "mensagem": f"Agendado automaticamente pelo sistemas (Automação Marques).\n Atendente responsavel pelo agendamento: {id_tecnico_TICKET}",
+            "status": "AG",
+            "data": data_now,
+            "id_evento": "",
+            "latitude": "",
+            "longitude": "",
+            "gps_time": "",
+            "id_ticket": str(id_ticket),
+            "id_filial": str(payload_agenda.get("id_filial", 2))
+        }
+        headers_alterar = {**HEADERS, "Content-Type": "application/json"}
+
+        success = False
+        try:
+            resp_alter_put = requests.put(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+            if resp_alter_put.status_code >= 200 and resp_alter_put.status_code < 300:
+                success = True
+            else:
+                print(f"PUT su_oss_chamado_alterar_setor retornou status {resp_alter_put.status_code}: {resp_alter_put.text}")
+        except Exception as e:
+            print("Erro no PUT su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            try:
+                resp_alter_post = requests.post(alterar_url, headers=headers_alterar, data=json.dumps(alterar_payload), timeout=30)
+                if resp_alter_post.status_code >= 200 and resp_alter_post.status_code < 300:
+                    success = True
+                else:
+                    print(f"POST su_oss_chamado_alterar_setor retornou status {resp_alter_post.status_code}: {resp_alter_post.text}")
+            except Exception as e:
+                print("Erro no POST su_oss_chamado_alterar_setor:", e)
+
+        if not success:
+            return jsonify({"error": "Erro ao aplicar alterar_setor (status/setor). Veja logs do servidor para detalhes."}), 400
+
+        # ---- PUT detalhado para gravar dados completos ----
+        resp_put = requests.put(f"{HOST}/su_oss_chamado/{id_os}", headers=HEADERS, data=json.dumps(payload_agenda), timeout=30)
+        if resp_put.status_code != 200:
+            return jsonify({"error": f"Erro ao agendar OS (PUT detalhado): {resp_put.status_code} - {resp_put.text}"}), 400
+
+        return jsonify({
+            "message": "ONU Alarmada agendada com sucesso!",
+            "id_ticket": id_ticket,
+            "id_os_mudanca": id_os,
+            "protocolo_os": protocolo_os
+        }), 200
+
+    except Exception as e:
+        print("EXCEPTION /api/alarmada:", str(e))
+        return jsonify({"error": str(e)}), 500
+
+# --------------------------
 # Execução
 # --------------------------
 if __name__ == "__main__":
